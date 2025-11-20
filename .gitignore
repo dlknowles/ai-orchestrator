@@ -187,6 +187,22 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file. However, if you prefer, 
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
+# VS Code
+.vscode/
+# But allow shared workspace settings if needed:
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Logs
+*.log
+
+# MyPy / type checker
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pyright / pylance
+.pyright/
 
 # Ruff stuff:
 .ruff_cache/
