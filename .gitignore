@@ -57,6 +57,7 @@ config.json
 examples/output.txt
 examples/*.out
 examples/*.generated.*
+examples/*_output.txt
 
 # If your orchestrator ever writes artifacts here, ignore them
 outputs/
