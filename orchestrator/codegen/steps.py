@@ -1,6 +1,9 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
+import json
+import os
+import re
 from .context import CodegenContext
 from .llm_client import LMStudioClient
 
@@ -15,6 +18,87 @@ class LoadProjectSpecStep:
         ctx.ensure_spec_exists()
 
         ctx.spec_text = ctx.spec_path.read_text(encoding="utf-8")
+
+EXCLUDED_DIRS = {
+    "node_modules",
+    ".git",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    ".cache",
+}
+
+EXCLUDED_FILE_NAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+}
+
+MAX_FILES_IN_SUMMARY = 500  # safety cap for very large projects
+
+
+class ProjectScanningStep:
+    """
+    Read-only structural scan of the project to give the LLM lightweight context:
+    - directory and file list
+    - file sizes
+
+    Excludes heavy/noisy folders like node_modules and lockfiles.
+    DOES NOT include file contents to keep the prompt well under context limits.
+    """
+
+    def run(self, ctx: CodegenContext) -> None:
+        ctx.ensure_project_exists()
+        root = ctx.project_path
+
+        files_info: list[dict[str, object]] = []
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            # filter out excluded dirs in-place so os.walk does not descend into them
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+
+            for fname in filenames:
+                if fname in EXCLUDED_FILE_NAMES:
+                    continue
+
+                fpath = Path(dirpath) / fname
+                rel_path = fpath.relative_to(root).as_posix()
+
+                # also exclude some obvious junk by suffix
+                if rel_path.endswith(".log"):
+                    continue
+
+                try:
+                    size_bytes = fpath.stat().st_size
+                except OSError:
+                    continue
+
+                files_info.append(
+                    {
+                        "path": rel_path,
+                        "size_bytes": size_bytes,
+                    }
+                )
+
+                # safety cap to avoid giant monorepos blowing up the context
+                if len(files_info) >= MAX_FILES_IN_SUMMARY:
+                    break
+
+            if len(files_info) >= MAX_FILES_IN_SUMMARY:
+                break
+
+        summary = {
+            "root": str(root),
+            "target_file": ctx.target_file.as_posix(),
+            "files": files_info,
+        }
+
+        # Compact JSON: no spaces → fewer tokens
+        ctx.project_context = json.dumps(summary, separators=(",", ":"))
 
 
 class GenerateComponentStep:
@@ -48,12 +132,11 @@ class GenerateComponentStep:
             "   - Do NOT import from files that do not already exist.\n"
             "   - Do NOT add routing libraries, state libraries, or CSS files.\n"
             "   - Use only React, TypeScript, and Tailwind utility classes.\n"
-            "4. TAILWIND RULES (strict):\n"
-            "    - You may only use valid Tailwind classes from the default Tailwind CSS palette.\n"
-            "    - You MUST NOT invent color shades (e.g., bg-slate-750, bg-slate-850).\n"
-            "    - Allowed slate shades are ONLY: 50, 100, 200, 300, 400, 500, 600, 700, 800, 900.\n"
-            "    - Allowed variants must match Tailwind defaults (hover:, focus:, active:, etc.).\n"
-            "    - Do NOT use any class that Tailwind does not ship with by default.\n"
+            "4. Tailwind rules (STRICT):\n"
+            "   - You may only use Tailwind classes that exist in the default Tailwind CSS config.\n"
+            "   - DO NOT invent color shades such as bg-slate-750, text-slate-850, etc.\n"
+            "   - Valid slate shades are ONLY: 50, 100, 200, 300, 400, 500, 600, 700, 800, 900.\n"
+            "   - Use standard variants like hover:, focus:, active:, etc. Do NOT invent new variants.\n"
             "5. Functional + typed React:\n"
             "   - Use function components and hooks only (no class components).\n"
             "   - Define appropriate TypeScript types for props and data structures.\n"
@@ -70,14 +153,27 @@ class GenerateComponentStep:
         )
 
         # 2) USER PROMPT: spec + minimal direct request
+        project_context_section = ""
+        if ctx.project_context:
+            # Hard clamp to avoid context overflow in extreme cases
+            MAX_CONTEXT_CHARS = 6000
+            context_str = ctx.project_context
+            if len(context_str) > MAX_CONTEXT_CHARS:
+                context_str = context_str[:MAX_CONTEXT_CHARS] + ".../* project context trimmed by orchestrator */"
+            project_context_section = "# Project Context (read-only)\n" + context_str + "\n\n"
+
+        
         user_prompt = (
+            project_context_section +
             "# Project Spec\n\n"
             f"{ctx.spec_text}\n\n"
             "# Task\n"
             f"Generate the COMPLETE contents of `{target_path}` as a single TSX/TS file, "
-            "following ALL rules in the system message. "
+            "using the project context above when relevant and following ALL rules in the system message. "
+            "Do NOT reference or modify any other files. "
             "Output ONLY the raw file contents."
         )
+
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -91,7 +187,10 @@ class GenerateComponentStep:
         )
 
         cleaned = self._strip_fence(code)
+        cleaned = self._sanitize_tailwind(cleaned)
         ctx.generated_code = cleaned
+
+
 
     @staticmethod
     def _strip_fence(text: str) -> str:
@@ -115,6 +214,93 @@ class GenerateComponentStep:
             stripped = "\n".join(lines).strip()
 
         return stripped
+
+
+    @staticmethod
+    def _sanitize_tailwind(text: str) -> str:
+        """
+        Post-process Tailwind color classes to avoid invalid numeric shades, e.g. bg-slate-750
+        or text-blue-845.
+
+        For any color utility like:
+          - bg-<color>-XYZ
+          - text-<color>-XYZ
+          - border-<color>-XYZ
+          - outline-<color>-XYZ
+          - ring-<color>-XYZ
+          - from-<color>-XYZ
+          - via-<color>-XYZ
+          - to-<color>-XYZ
+          - accent-<color>-XYZ
+          - caret-<color>-XYZ
+          - decoration-<color>-XYZ
+
+        where XYZ is not a valid Tailwind shade, we:
+        - Parse XYZ as an integer.
+        - If 0–99    -> snap to 50.
+        - If 100–199 -> snap to 100.
+        - If 200–299 -> snap to 200.
+        - ...
+        - If 800–899 -> snap to 800.
+        - If 900+    -> snap to 900.
+
+        Non-color utilities (e.g. p-4, gap-2, z-50) are left untouched.
+        """
+        # Tailwind default color names
+        color_names = (
+            "slate", "gray", "zinc", "neutral", "stone",
+            "red", "orange", "amber", "yellow",
+            "lime", "green", "emerald", "teal", "cyan",
+            "sky", "blue", "indigo", "violet", "purple",
+            "fuchsia", "pink", "rose",
+        )
+        allowed_shades = {"50", "100", "200", "300", "400", "500", "600", "700", "800", "900"}
+
+        # Build a regex that matches ONLY color utilities with numeric shades
+        # e.g. bg-slate-750, text-blue-845, border-red-15, etc.
+        color_names_pattern = "|".join(color_names)
+        pattern = re.compile(
+            rf"\b("
+            rf"(?:bg|text|border|outline|ring|from|via|to|accent|caret|decoration)"
+            rf"-(?:{color_names_pattern})-"
+            rf")"
+            rf"(\d{{1,3}})\b"
+        )
+
+        def snap_shade(shade_str: str) -> str:
+            try:
+                n = int(shade_str)
+            except ValueError:
+                # If it's not an int at all, just default to 700 as a safe fallback
+                return "700"
+
+            if n <= 99:
+                return "50"
+            if n >= 900:
+                return "900"
+
+            # 100–199 -> 100, 200–299 -> 200, etc.
+            base = (n // 100) * 100
+            # Clamp to valid range
+            if base < 100:
+                base = 100
+            if base > 900:
+                base = 900
+            return str(base)
+
+        def replace(match: re.Match) -> str:
+            prefix, shade = match.group(1), match.group(2)
+            if shade in allowed_shades:
+                return match.group(0)
+
+            snapped = snap_shade(shade)
+            if snapped not in allowed_shades:
+                # final safety: if somehow still not valid, default to 700
+                snapped = "700"
+
+            return f"{prefix}{snapped}"
+
+        return pattern.sub(replace, text)
 
 
 class WriteGeneratedFileStep:

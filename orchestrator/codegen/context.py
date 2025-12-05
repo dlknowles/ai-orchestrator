@@ -10,6 +10,7 @@ class CodegenContext:
 
     spec_text: Optional[str] = None
     generated_code: Optional[str] = None
+    project_context: Optional[str] = None  # JSON blob / summary
 
     @property
     def abs_target_file(self) -> Path:

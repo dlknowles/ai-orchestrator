@@ -2,7 +2,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 from .context import CodegenContext
-from .steps import (LoadProjectSpecStep, GenerateComponentStep, WriteGeneratedFileStep, Step)
+from .steps import (
+    LoadProjectSpecStep,
+    ProjectScanningStep,
+    GenerateComponentStep,
+    WriteGeneratedFileStep,
+    Step,
+)
 
 
 class CodegenTask:
@@ -20,6 +26,7 @@ class CodegenTask:
         )
         self.steps: List[Step] = steps or [
             LoadProjectSpecStep(),
+            ProjectScanningStep(),
             GenerateComponentStep(),
             WriteGeneratedFileStep(),
         ]
