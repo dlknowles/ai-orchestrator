@@ -303,6 +303,34 @@ class GenerateComponentStep:
         return pattern.sub(replace, text)
 
 
+class BackupExistingFileStep:
+    """
+    If the target file already exists, create a timestamped backup copy
+    under .orchestrator_backups/ relative to the project root.
+    """
+
+    def run(self, ctx: CodegenContext) -> None:
+        abs_target = ctx.abs_target_file
+        if not abs_target.is_file():
+            # Nothing to back up
+            return
+
+        # .orchestrator_backups/src/App.tsx.20251205-132045.bak
+        from datetime import datetime
+
+        backup_root = ctx.project_path / ".orchestrator_backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+
+        rel_path = abs_target.relative_to(ctx.project_path)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+        backup_dir = backup_root / rel_path.parent
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        backup_file = backup_dir / f"{rel_path.name}.{timestamp}.bak"
+        backup_file.write_text(abs_target.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 class WriteGeneratedFileStep:
     def run(self, ctx: CodegenContext) -> None:
         if ctx.generated_code is None:
