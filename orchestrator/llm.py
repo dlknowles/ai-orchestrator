@@ -5,7 +5,7 @@ from openai import OpenAI
 
 
 # Adjust this model name to whatever LM Studio is serving
-DEFAULT_MODEL_NAME = "qwen2.5-3b-instruct"  # e.g. from LM Studio Server panel
+DEFAULT_MODEL_NAME = "qwen/qwen3-coder-30b"  # e.g. from LM Studio Server panel
 
 
 def get_client() -> OpenAI:
