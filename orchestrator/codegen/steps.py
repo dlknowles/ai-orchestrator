@@ -20,6 +20,7 @@ class LoadProjectSpecStep:
 class GenerateComponentStep:
     """
     Calls LM Studio to create a complete TSX/TS file for the target.
+    The model is treated strictly as a code printer for a single file.
     """
 
     def __init__(self, llm: LMStudioClient | None = None) -> None:
@@ -30,25 +31,46 @@ class GenerateComponentStep:
             raise ValueError("spec_text is not loaded. Run LoadProjectSpecStep first.")
 
         target_path: Path = ctx.target_file
-        # MVP assumption: Vite + React + TypeScript,
-        # target is something like src/App.tsx or src/main.tsx
+
+        # 1) SYSTEM PROMPT: strict contract
         system_prompt = (
-            "You are an expert React + TypeScript code generator. "
-            "You receive a high-level project spec and must generate a single complete source file for `{target_path}` in a Vite + React + TypeScript project.\n\n"
-            "Requirements:\n"
-            "- Output ONLY the raw file contents. No backticks, no markdown, no comments outside the code.\n"
-            "- Assume React 18 and Vite standard layout.\n"
-            "- The file must be valid TypeScript/TSX and compile without modification.\n"
-            "- Do not add explanations, just the code.\n"
+            "You are an expert React + TypeScript code generator running inside an automated tool. "
+            "You MUST obey the following rules exactly:\n\n"
+            "1. You generate the contents of ONE AND ONLY ONE file.\n"
+            f"   - Target file path (relative to project root): {target_path}\n"
+            "   - The project is a Vite + React + TypeScript + Tailwind CSS project.\n"
+            "2. Output MUST be valid TypeScript/TSX code that compiles without edits.\n"
+            "   - Do NOT include markdown, backticks, fences, or explanations.\n"
+            "   - Do NOT include comments outside the code.\n"
+            "   - Do NOT mention that you are an AI or describe what you are doing.\n"
+            "3. No extra files or imports:\n"
+            "   - Do NOT assume any files other than the default Vite React TS template.\n"
+            "   - Do NOT import from files that do not already exist.\n"
+            "   - Do NOT add routing libraries, state libraries, or CSS files.\n"
+            "   - Use only React, TypeScript, and Tailwind utility classes.\n"
+            "4. Functional + typed React:\n"
+            "   - Use function components and hooks only (no class components).\n"
+            "   - Define appropriate TypeScript types for props and data structures.\n"
+            "5. Structure for this particular file (strongly preferred):\n"
+            "   - Define Task and TaskStep types.\n"
+            "   - Define a hard-coded array of tasks: const tasks: Task[] = [...].\n"
+            "   - Use useState to track selectedTaskId.\n"
+            "   - Derive selectedTask from tasks + selectedTaskId.\n"
+            "   - Render a responsive two-column layout using Tailwind.\n"
+            "6. ABSOLUTELY NO:\n"
+            "   - Markdown code fences like ```tsx or ```ts.\n"
+            "   - Text such as 'Here is the code', 'Explanation', or similar.\n"
+            "   - TODO markers or placeholder pseudo-code.\n"
         )
 
+        # 2) USER PROMPT: spec + minimal direct request
         user_prompt = (
-            f"# Project Spec\n\n"
+            "# Project Spec\n\n"
             f"{ctx.spec_text}\n\n"
-            f"# Target file\n"
-            f"- Project root: {ctx.project_path}\n"
-            f"- File to generate or overwrite: {target_path}\n\n"
-            "Generate ONLY the contents for this file."
+            "# Task\n"
+            f"Generate the COMPLETE contents of `{target_path}` as a single TSX/TS file, "
+            "following ALL rules in the system message. "
+            "Output ONLY the raw file contents."
         )
 
         messages = [
@@ -62,22 +84,30 @@ class GenerateComponentStep:
             max_tokens=4096,
         )
 
-        # Some models still sneak in backticks. Strip common wrappers defensively.
         cleaned = self._strip_fence(code)
         ctx.generated_code = cleaned
 
     @staticmethod
     def _strip_fence(text: str) -> str:
+        """
+        Defensive cleanup in case the model still wraps the code in ``` fences.
+        """
         stripped = text.strip()
+
+        # Common case: ```tsx ... ``` or ```ts ... ```
         if stripped.startswith("```"):
-            # Remove leading ```... and trailing ```
             lines = stripped.splitlines()
+
             # Drop first line (``` or ```tsx/ts)
-            lines = lines[1:]
+            if lines:
+                lines = lines[1:]
+
             # Drop final ``` if present
             if lines and lines[-1].strip().startswith("```"):
                 lines = lines[:-1]
+
             stripped = "\n".join(lines).strip()
+
         return stripped
 
 
