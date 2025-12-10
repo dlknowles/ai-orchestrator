@@ -140,13 +140,21 @@ class GenerateComponentStep:
             "5. Functional + typed React:\n"
             "   - Use function components and hooks only (no class components).\n"
             "   - Define appropriate TypeScript types for props and data structures.\n"
-            "6. Structure for this particular file (strongly preferred):\n"
+            "6. Component composition and imports:\n"
+            "   - You MUST obey any explicit component decomposition requirements in the spec.\n"
+            "   - If the spec requires that this file import a component from a given relative path "
+            "     (for example './components/Sidebar'), you MUST:\n"
+            "       - Add a matching import statement at the top of the file.\n"
+            "       - Use that imported component in the JSX.\n"
+            "       - NOT define that component in this file.\n"
+            "   - Do NOT ignore these requirements, even if the app could be implemented in a single component.\n"
+            "7. Structure for this particular file (strongly preferred):\n"
             "   - Define Task and TaskStep types.\n"
             "   - Define a hard-coded array of tasks: const tasks: Task[] = [...].\n"
             "   - Use useState to track selectedTaskId.\n"
             "   - Derive selectedTask from tasks + selectedTaskId.\n"
             "   - Render a responsive two-column layout using Tailwind.\n"
-            "7. ABSOLUTELY NO:\n"
+            "8. ABSOLUTELY NO:\n"
             "   - Markdown code fences like ```tsx or ```ts.\n"
             "   - Text such as 'Here is the code', 'Explanation', or similar.\n"
             "   - TODO markers or placeholder pseudo-code.\n"
@@ -329,6 +337,127 @@ class BackupExistingFileStep:
 
         backup_file = backup_dir / f"{rel_path.name}.{timestamp}.bak"
         backup_file.write_text(abs_target.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+RELATIVE_IMPORT_PATTERN = re.compile(
+    r"""import\s+(?:[^'"]+\s+from\s+)?['"](\./[^'"]*|\../[^'"]*)['"]""",
+    re.MULTILINE,
+)
+
+DYNAMIC_IMPORT_PATTERN = re.compile(
+    r"""import\(\s*['"](\./[^'"]*|\../[^'"]*)['"]\s*\)""",
+    re.MULTILINE,
+)
+
+
+def _extract_relative_imports(source: str) -> list[str]:
+    """
+    Extract relative import specifiers from TS/TSX source code.
+
+    Handles:
+      import X from './foo';
+      import { X } from '../bar/baz';
+      import './side-effect';
+      const mod = await import('./dynamic');
+    """
+    imports: set[str] = set()
+
+    for m in RELATIVE_IMPORT_PATTERN.finditer(source):
+        imports.add(m.group(1))
+
+    for m in DYNAMIC_IMPORT_PATTERN.finditer(source):
+        imports.add(m.group(1))
+
+    return sorted(imports)
+
+
+class ImportValidationStep:
+    """
+    Validates that all relative imports in the generated code point to existing files
+    in the scanned project.
+
+    Strict mode: if any import cannot be resolved to a real file, the step raises
+    and the task fails. No file is written.
+    """
+
+    def __init__(self) -> None:
+        # Extensions we consider when resolving bare import paths without an extension.
+        self.candidate_exts: tuple[str, ...] = (
+            ".tsx",
+            ".ts",
+            ".jsx",
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".json",
+        )
+
+    def run(self, ctx: CodegenContext) -> None:
+        if ctx.generated_code is None:
+            raise ValueError("generated_code is not set. Run GenerateComponentStep first.")
+
+        if not ctx.project_context:
+            # If we somehow have no project context, we cannot validate; fail fast.
+            raise ValueError("project_context is not set. Run ProjectScanningStep first.")
+
+        try:
+            context_obj = json.loads(ctx.project_context)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"project_context is not valid JSON: {exc}") from exc
+
+        files = context_obj.get("files") or []
+        existing_paths = {str(entry.get("path")) for entry in files if "path" in entry}
+
+        # If project has no files, something is wrong; but don't block imports in that case.
+        if not existing_paths:
+            return
+
+        # Extract relative imports from the generated source.
+        imports = _extract_relative_imports(ctx.generated_code)
+        if not imports:
+            return  # nothing to validate
+
+        base_dir = ctx.target_file.parent.as_posix()  # relative to project root
+
+        missing: list[str] = []
+
+        for spec in imports:
+            # spec is something like './Foo' or '../components/Sidebar'
+            # We resolve this relative to the target file directory.
+            rel = Path(base_dir) / spec
+            # Normalize to posix-style path relative to project root; remove leading './'
+            rel_norm = rel.as_posix()
+            if rel_norm.startswith("./"):
+                rel_norm = rel_norm[2:]
+
+            # If the spec already has an extension, check it directly.
+            suffix = Path(rel_norm).suffix
+            candidate_paths: list[str] = []
+
+            if suffix:
+                candidate_paths.append(rel_norm)
+            else:
+                # Try with our candidate extensions.
+                stem_path = rel_norm
+                candidate_paths.extend(stem_path + ext for ext in self.candidate_exts)
+                # Also support index files in directories: ./foo -> ./foo/index.tsx, etc.
+                candidate_paths.extend(
+                    stem_path.rstrip("/") + "/index" + ext for ext in self.candidate_exts
+                )
+
+            # See if any candidate exists in the project file list.
+            if not any(c in existing_paths for c in candidate_paths):
+                missing.append(spec)
+
+        if missing:
+            details = "\n  ".join(missing)
+            raise ValueError(
+                "ImportValidationStep failed: the following relative imports do not "
+                "resolve to existing files in the project:\n"
+                f"  {details}\n\n"
+                "Either adjust the spec/prompt, create the referenced files, or relax "
+                "validation logic if this is intentional."
+            )
 
 
 class WriteGeneratedFileStep:

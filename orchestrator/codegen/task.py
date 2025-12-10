@@ -6,6 +6,7 @@ from .steps import (
     LoadProjectSpecStep,
     ProjectScanningStep,
     GenerateComponentStep,
+    ImportValidationStep,
     BackupExistingFileStep,
     WriteGeneratedFileStep,
     Step,
@@ -29,6 +30,7 @@ class CodegenTask:
             LoadProjectSpecStep(),
             ProjectScanningStep(),
             GenerateComponentStep(),
+            ImportValidationStep(),
             BackupExistingFileStep(),
             WriteGeneratedFileStep(),
         ]
